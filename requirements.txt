@@ -3,3 +3,4 @@ pymupdf
 google-genai
 pandas
 pydantic
+st-gsheets-connection
