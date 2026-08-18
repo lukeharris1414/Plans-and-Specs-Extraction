@@ -139,21 +139,35 @@ if uploaded_files:
 
                     st.info(f"🧠 Extracting bidding data for `{uploaded_file.name}`...")
 
-                    try:
-                        response = client.models.generate_content(
-                            model='gemini-3.7-flash',
-                            contents=[uploaded_doc, prompt],
-                            config={
-                                'response_mime_type': 'application/json',
-                                'response_schema': ProjectSummary,
-                            }
-                        )
-                        result_data = response.parsed.model_dump()
-                        result_data['Source File'] = uploaded_file.name
-                        results_list.append(result_data)
-                    except Exception as e:
-                        st.error(f"Failed to generate summary for {uploaded_file.name}. It may still be too large or complex for a single pass.")
-                        st.write(e)
+                    # --- AUTOMATED RETRY LOOP FOR SERVER TRAFFIC JAMS ---
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            response = client.models.generate_content(
+                                model='gemini-3.7-flash',
+                                contents=[uploaded_doc, prompt],
+                                config={
+                                    'response_mime_type': 'application/json',
+                                    'response_schema': ProjectSummary,
+                                }
+                            )
+                            result_data = response.parsed.model_dump()
+                            result_data['Source File'] = uploaded_file.name
+                            results_list.append(result_data)
+                            break  # Success! Exit the retry loop.
+                            
+                        except Exception as e:
+                            error_msg = str(e).upper()
+                            if "503" in error_msg or "UNAVAILABLE" in error_msg:
+                                if attempt < max_retries - 1:
+                                    st.warning(f"Google servers are currently busy. Retrying in 10 seconds... (Attempt {attempt + 1} of {max_retries})")
+                                    time.sleep(10)
+                                else:
+                                    st.error(f"Google servers are too busy to process `{uploaded_file.name}` right now. Please try again later.")
+                            else:
+                                st.error(f"Failed to generate summary for `{uploaded_file.name}`.")
+                                st.write(e)
+                                break  # Break loop if it's a different kind of error
 
                     # Clean up cloud file and local temp files
                     client.files.delete(name=uploaded_doc.name)
