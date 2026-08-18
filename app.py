@@ -3,7 +3,7 @@ import pymupdf
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
-from typing import List  # Added for older Python compatibility
+from typing import List
 import pandas as pd
 import tempfile
 import os
@@ -212,22 +212,24 @@ if "master_project_result" in st.session_state:
 
     st.write(f"**Reasoning:** {data.get('reason', '')}")
 
+    # FIX: Wrap all values in str() to prevent PyArrow Mixed Type Crashes
     table_rows = [
-        {"Category / Scope": "Trees", "Value": data.get("trees", 0)},
-        {"Category / Scope": "Shrubs", "Value": data.get("shrubs", 0)},
-        {"Category / Scope": "Perennials & Grasses", "Value": data.get("perennials_and_grasses", 0)},
-        {"Category / Scope": "Seeding", "Value": data.get("seeding", "No")},
-        {"Category / Scope": "Restoration", "Value": data.get("restoration", "No")},
-        {"Category / Scope": "Irrigation", "Value": data.get("irrigation", "No")},
-        {"Category / Scope": "Bid Date", "Value": data.get("bid_date", "Not Found")},
-        {"Category / Scope": "Substantial Completion", "Value": data.get("substantial_completion", "Not Found")},
-        {"Category / Scope": "Landscape Sheets", "Value": data.get("landscape_sheets", "None")},
-        {"Category / Scope": "Plant Schedule", "Value": data.get("plant_schedule", "Not Found")},
-        {"Category / Scope": "Division 32", "Value": data.get("division_32", "Not Found")},
+        {"Category / Scope": "Trees", "Value": str(data.get("trees", 0))},
+        {"Category / Scope": "Shrubs", "Value": str(data.get("shrubs", 0))},
+        {"Category / Scope": "Perennials & Grasses", "Value": str(data.get("perennials_and_grasses", 0))},
+        {"Category / Scope": "Seeding", "Value": str(data.get("seeding", "No"))},
+        {"Category / Scope": "Restoration", "Value": str(data.get("restoration", "No"))},
+        {"Category / Scope": "Irrigation", "Value": str(data.get("irrigation", "No"))},
+        {"Category / Scope": "Bid Date", "Value": str(data.get("bid_date", "Not Found"))},
+        {"Category / Scope": "Substantial Completion", "Value": str(data.get("substantial_completion", "Not Found"))},
+        {"Category / Scope": "Landscape Sheets", "Value": str(data.get("landscape_sheets", "None"))},
+        {"Category / Scope": "Plant Schedule", "Value": str(data.get("plant_schedule", "Not Found"))},
+        {"Category / Scope": "Division 32", "Value": str(data.get("division_32", "Not Found"))},
     ]
 
     df = pd.DataFrame(table_rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    # FIX: use width='stretch' instead of use_container_width=True
+    st.dataframe(df, width='stretch', hide_index=True)
     
     # --- SECTION 2: PM BID PLANT SCHEDULE ---
     st.divider()
@@ -252,7 +254,8 @@ if "master_project_result" in st.session_state:
         available_cols = [col for col in expected_cols if col in plant_df.columns]
         plant_df = plant_df[available_cols]
         
-        st.dataframe(plant_df, use_container_width=True, hide_index=True)
+        # FIX: use width='stretch' instead of use_container_width=True
+        st.dataframe(plant_df, width='stretch', hide_index=True)
         
         # Build Download Buttons
         col_a, col_b = st.columns(2)
