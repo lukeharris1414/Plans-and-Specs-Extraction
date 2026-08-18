@@ -3,6 +3,7 @@ import pymupdf
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
+from typing import List  # Added for older Python compatibility
 import pandas as pd
 import tempfile
 import os
@@ -48,7 +49,7 @@ class ProjectSummary(BaseModel):
     plant_schedule: str = Field(description="Found or Not Found")
     division_32: str = Field(description="Found or Not Found")
     review_required: str = Field(description="Yes or No")
-    plant_schedule_list: list[PlantItem] = Field(description="List of all plants extracted from the most up-to-date plant schedule.")
+    plant_schedule_list: List[PlantItem] = Field(description="List of all plants extracted from the most up-to-date plant schedule.")
 
 # --- Helper Function: Smart Capped PDF Slicing ---
 def slice_landscape_pages(input_pdf_path, output_pdf_path):
@@ -145,7 +146,7 @@ if uploaded_files:
                 Task: Analyze ALL attached documents together as ONE single unified construction project. Cross-reference the plans, specs, and addenda.
                 Rules:
                 1. Scope Detection: Extract exact cumulative quantities for Trees, Shrubs, and Perennials/Grasses across all documents.
-                2. Plant Schedule Extraction: Locate the most up-to-date plant schedule. Extract EVERY plant line item into the 'plant_schedule_list'. Map 'Size' to size, 'Method/Root' to type, 'Common Name' to variety, and 'Quantity' to quantity. If there are revised sheets or addenda covering the schedule, use the revised quantities.
+                2. Plant Schedule Extraction: Locate the most up-to-date plant schedule. Extract EVERY plant line item into the 'plant_schedule_list'. Map 'Size' to size, 'Method/Root' to type, 'Common Name' to variety, and 'Quantity' to quantity. If there are revised sheets or addenda covering the schedule, use the revised quantities. If 'Method' or 'Common Name' is missing, output 'N/A'.
                 3. Ground Covers, Plugs, and Vines must be grouped under Perennials/Grasses.
                 4. Front-End Specs: Thoroughly scan for the Master Bid Date, Substantial Completion, and Wage Rates.
                 5. Wages: Look for 'Prevailing Wage', 'Davis-Bacon', 'Union'. If not found, output 'Non-Prevailing'.
@@ -233,9 +234,12 @@ if "master_project_result" in st.session_state:
     st.subheader("🌱 PM Bid Plant Schedule Export")
     
     plant_list = data.get("plant_schedule_list", [])
+    
+    # Safety Check: Only process if the list actually has items
     if plant_list:
-        # Convert to DataFrame and enforce strict column naming/ordering
         plant_df = pd.DataFrame(plant_list)
+        
+        # Rename columns to match PM Bid format
         plant_df.rename(columns={
             "size": "Size", 
             "type": "Type", 
@@ -243,8 +247,10 @@ if "master_project_result" in st.session_state:
             "quantity": "Quantity"
         }, inplace=True)
         
-        # Ensure exact column order for PM Bid tab
-        plant_df = plant_df[["Size", "Type", "Variety", "Quantity"]]
+        # Safety Check: Ensure all columns exist before trying to reorder them
+        expected_cols = ["Size", "Type", "Variety", "Quantity"]
+        available_cols = [col for col in expected_cols if col in plant_df.columns]
+        plant_df = plant_df[available_cols]
         
         st.dataframe(plant_df, use_container_width=True, hide_index=True)
         
