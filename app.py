@@ -22,11 +22,6 @@ st.set_page_config(
 st.title("🌿 Plans and Specs Extraction")
 st.markdown("Ingest construction documents, extract landscape scopes, and manage active bids across the team.")
 
-# --- API Key Setup ---
-api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Enter your Gemini API key")
-if not api_key:
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-
 # --- Schema Definition for Structured Output ---
 class PlantItem(BaseModel):
     size: str = Field(description="Size (Ex: 1.5\" CAL, #15, 4\", 18\", 24\" HT, 2\" CAL)")
