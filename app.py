@@ -16,7 +16,7 @@ st.set_page_config(
 )
 
 st.title("🌿 Construction Bid Plan Analyzer")
-st.markdown("Upload large plan sets or specification books. The app will automatically slice the landscape pages and compile a master project summary table.")
+st.markdown("Upload large plan sets or specification books. The app will automatically slice the landscape pages and cross-reference them to build ONE master project summary table.")
 
 # --- API Key Setup ---
 api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Enter your Gemini API key")
@@ -32,9 +32,9 @@ class ProjectSummary(BaseModel):
     bid_date: str = Field(description="Exact Date/Time or 'Not Found'")
     substantial_completion: str = Field(description="Date, Timeframe, or 'Not Found'")
     wages: str = Field(description="Prevailing or Non-Prevailing")
-    trees: int = Field(description="Total tree quantity")
-    shrubs: int = Field(description="Total shrub quantity")
-    perennials_and_grasses: int = Field(description="Total perennials and grasses (including ground covers, plugs, and vines)")
+    trees: int = Field(description="Total tree quantity across all documents")
+    shrubs: int = Field(description="Total shrub quantity across all documents")
+    perennials_and_grasses: int = Field(description="Total perennials/grasses/plugs across all documents")
     restoration: str = Field(description="Yes or No")
     seeding: str = Field(description="Yes or No")
     irrigation: str = Field(description="Yes or No")
@@ -92,17 +92,17 @@ uploaded_files = st.file_uploader("Drop Bid PDF(s) (Plans or Specs)", type=["pdf
 
 if uploaded_files:
     file_names_str = ", ".join([f"`{f.name}`" for f in uploaded_files])
-    st.info(f"📁 **Files Uploaded:** {file_names_str}")
+    st.info(f"📁 **Project Files Uploaded:** {file_names_str}")
 
-    if st.button("🚀 Analyze Batch & Build Master Table", type="primary"):
+    if st.button("🚀 Cross-Reference & Extract Master Project", type="primary"):
         if not api_key:
             st.error("Please enter a valid Gemini API Key in the sidebar.")
         else:
-            results_list = []
-            
-            with st.spinner("Uploading large documents and processing sequentially..."):
-                client = genai.Client(api_key=api_key)
+            with st.spinner("Slicing and uploading all documents to secure cloud storage..."):
+                client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=600000))
+                cloud_documents = []
                 
+                # STEP 1: Process and upload everything first
                 for uploaded_file in uploaded_files:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
                         tmp_in.write(uploaded_file.getbuffer())
@@ -111,116 +111,138 @@ if uploaded_files:
                     temp_output_path = temp_input_path.replace(".pdf", "_sliced.pdf")
 
                     total_pgs, sliced_pgs, matched_list = slice_landscape_pages(temp_input_path, temp_output_path)
-                    st.success(f"⚡ `{uploaded_file.name}`: Scanned {total_pgs} pages. Filtered down to **{sliced_pgs}** core pages.")
+                    st.success(f"⚡ `{uploaded_file.name}` sliced from {total_pgs} to **{sliced_pgs}** core pages.")
 
                     # Safely upload using the Files API
                     uploaded_doc = client.files.upload(file=temp_output_path)
                     
-                    # Waiting room loop to ensure Google servers fully index the file
                     while True:
                         file_info = client.files.get(name=uploaded_doc.name)
                         if "ACTIVE" in str(file_info.state):
+                            cloud_documents.append(uploaded_doc)
                             break
                         elif "FAILED" in str(file_info.state):
                             st.error(f"Google failed to process {uploaded_file.name}")
                             break
                         time.sleep(3)
 
-                    prompt = f"""
-                    Role: Expert Commercial Landscape Estimating AI.
-                    Task: Analyze the attached document part ({uploaded_file.name}) for a construction project.
-                    Rules:
-                    1. Scope Detection: Extract exact quantities for Trees, Shrubs, and Perennials/Grasses found in this document.
-                    2. Ground Covers, Plugs, and Vines must be grouped under Perennials/Grasses.
-                    3. Front-End Specs: Thoroughly scan for Bid Dates, Substantial Completion parameters, and Wage Rates.
-                    4. Wages: Look for 'Prevailing Wage', 'Davis-Bacon', 'Union'. If not found, output 'Non-Prevailing'.
-                    5. Output strictly to the structured schema provided.
-                    """
+                    # Cleanup local temp files
+                    if os.path.exists(temp_input_path): os.remove(temp_input_path)
+                    if os.path.exists(temp_output_path): os.remove(temp_output_path)
 
-                    st.info(f"🧠 Extracting bidding data for `{uploaded_file.name}`...")
+                # STEP 2: Send ONE massive request to the AI with all files combined
+                st.info("🧠 All documents uploaded! Running cross-document AI analysis...")
 
-                    # --- AUTOMATED RETRY LOOP FOR SERVER TRAFFIC JAMS ---
-                    max_retries = 3
-                    for attempt in range(max_retries):
-                        try:
-                            response = client.models.generate_content(
-                                model='gemini-3.7-flash',
-                                contents=[uploaded_doc, prompt],
-                                config={
-                                    'response_mime_type': 'application/json',
-                                    'response_schema': ProjectSummary,
-                                }
-                            )
-                            result_data = response.parsed.model_dump()
-                            result_data['Source File'] = uploaded_file.name
-                            results_list.append(result_data)
-                            break  # Success! Exit the retry loop.
-                            
-                        except Exception as e:
-                            error_msg = str(e).upper()
-                            if "503" in error_msg or "UNAVAILABLE" in error_msg:
-                                if attempt < max_retries - 1:
-                                    st.warning(f"Google servers are currently busy. Retrying in 10 seconds... (Attempt {attempt + 1} of {max_retries})")
-                                    time.sleep(10)
-                                else:
-                                    st.error(f"Google servers are too busy to process `{uploaded_file.name}` right now. Please try again later.")
+                prompt = f"""
+                Role: Expert Commercial Landscape Estimating AI.
+                Task: Analyze ALL attached documents together as ONE single unified construction project. Cross-reference the plans, specs, and addenda.
+                Rules:
+                1. Scope Detection: Extract exact cumulative quantities for Trees, Shrubs, and Perennials/Grasses across all documents.
+                2. Ground Covers, Plugs, and Vines must be grouped under Perennials/Grasses.
+                3. Front-End Specs: Thoroughly scan for the Master Bid Date, Substantial Completion, and Wage Rates.
+                4. Wages: Look for 'Prevailing Wage', 'Davis-Bacon', 'Union'. If not found, output 'Non-Prevailing'.
+                5. Output strictly to the structured schema provided.
+                """
+                
+                # Combine all uploaded files and the prompt into one payload
+                contents_payload = cloud_documents + [prompt]
+
+                # --- AUTOMATED RETRY LOOP FOR SERVER TRAFFIC JAMS ---
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        response = client.models.generate_content(
+                            model='gemini-3.7-flash',
+                            contents=contents_payload,
+                            config={
+                                'response_mime_type': 'application/json',
+                                'response_schema': ProjectSummary,
+                            }
+                        )
+                        result_data = response.parsed.model_dump()
+                        result_data['Source Files'] = file_names_str
+                        st.session_state["master_project_result"] = result_data
+                        break  # Success! Exit loop.
+                        
+                    except Exception as e:
+                        error_msg = str(e).upper()
+                        if "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg:
+                            if attempt < max_retries - 1:
+                                st.warning(f"Google servers are currently busy. Retrying in 15 seconds... (Attempt {attempt + 1} of {max_retries})")
+                                time.sleep(15)
                             else:
-                                st.error(f"Failed to generate summary for `{uploaded_file.name}`.")
-                                st.write(e)
-                                break  # Break loop if it's a different kind of error
+                                st.error("Google servers are too busy right now. Please try again later.")
+                        else:
+                            st.error("Failed to generate master summary.")
+                            st.write(e)
+                            break 
 
-                    # Clean up cloud file and local temp files
-                    client.files.delete(name=uploaded_doc.name)
-                    if os.path.exists(temp_input_path):
-                        os.remove(temp_input_path)
-                    if os.path.exists(temp_output_path):
-                        os.remove(temp_output_path)
+                # STEP 3: Clean up cloud storage
+                for doc in cloud_documents:
+                    try:
+                        client.files.delete(name=doc.name)
+                    except:
+                        pass
 
-                st.session_state["batch_analysis_results"] = results_list
-
-# --- Display Master Combined Table ---
-if "batch_analysis_results" in st.session_state:
+# --- Display Master Unified Table ---
+if "master_project_result" in st.session_state:
+    data = st.session_state["master_project_result"]
     st.divider()
-    st.subheader("📊 Master Unified Project Summary Table")
-    st.markdown("Each document's extracted metrics shown together for complete project visibility:")
+    st.subheader("📊 Master Unified Project Summary")
+    st.markdown(f"**Source Documents Analyzed:** {data.get('Source Files')}")
 
-    master_rows = []
-    for data in st.session_state["batch_analysis_results"]:
-        row_data = {
-            "Source File": data.get("Source File"),
-            "Recommendation": data.get("recommendation", "N/A"),
-            "Confidence": f"{data.get('confidence', 0)}%",
-            "Location": data.get("location", "N/A"),
-            "Wages": data.get("wages", "N/A"),
-            "Trees": data.get("trees", 0),
-            "Shrubs": data.get("shrubs", 0),
-            "Perennials & Grasses": data.get("perennials_and_grasses", 0),
-            "Seeding": data.get("seeding", "No"),
-            "Restoration": data.get("restoration", "No"),
-            "Irrigation": data.get("irrigation", "No"),
-            "Bid Date": data.get("bid_date", "Not Found"),
-            "Substantial Completion": data.get("substantial_completion", "Not Found"),
-            "Landscape Sheets": data.get("landscape_sheets", "None"),
-            "Plant Schedule": data.get("plant_schedule", "Not Found"),
-            "Division 32": data.get("division_32", "Not Found"),
-            "Reasoning": data.get("reason", "")
-        }
-        master_rows.append(row_data)
+    col1, col2, col3, col4 = st.columns(4)
+    rec = data.get("recommendation", "N/A")
+    rec_color = "green" if rec == "Qualified" else ("orange" if rec == "Review" else "red")
+    
+    col1.metric("Recommendation", f":{rec_color}[{rec}]")
+    col2.metric("Confidence", f"{data.get('confidence', 0)}%")
+    col3.metric("Wages", data.get("wages", "N/A"))
+    col4.metric("Location", data.get("location", "N/A"))
 
-    master_df = pd.DataFrame(master_rows)
-    st.dataframe(master_df, use_container_width=True, hide_index=True)
+    st.write(f"**Reasoning:** {data.get('reason', '')}")
+
+    table_rows = [
+        {"Category / Scope": "Trees", "Value": data.get("trees", 0)},
+        {"Category / Scope": "Shrubs", "Value": data.get("shrubs", 0)},
+        {"Category / Scope": "Perennials & Grasses", "Value": data.get("perennials_and_grasses", 0)},
+        {"Category / Scope": "Seeding", "Value": data.get("seeding", "No")},
+        {"Category / Scope": "Restoration", "Value": data.get("restoration", "No")},
+        {"Category / Scope": "Irrigation", "Value": data.get("irrigation", "No")},
+        {"Category / Scope": "Bid Date", "Value": data.get("bid_date", "Not Found")},
+        {"Category / Scope": "Substantial Completion", "Value": data.get("substantial_completion", "Not Found")},
+        {"Category / Scope": "Landscape Sheets", "Value": data.get("landscape_sheets", "None")},
+        {"Category / Scope": "Plant Schedule", "Value": data.get("plant_schedule", "Not Found")},
+        {"Category / Scope": "Division 32", "Value": data.get("division_32", "Not Found")},
+    ]
+
+    df = pd.DataFrame(table_rows)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    
+    # Format flat row for export
+    flat_data = {
+        "Source Files": data.get("Source Files"), 
+        "Recommendation": rec, 
+        "Confidence": f"{data.get('confidence', 0)}%",
+        "Location": data.get("location"),
+        "Wages": data.get("wages")
+    }
+    for row in table_rows:
+        flat_data[row["Category / Scope"]] = row["Value"]
+    
+    master_df = pd.DataFrame([flat_data])
 
     st.divider()
     col_a, col_b = st.columns(2)
     with col_a:
         csv_data = master_df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="📥 Download Master Summary (CSV)",
+            label="📥 Download Master Project Summary (CSV)",
             data=csv_data,
-            file_name="master_batch_extraction_summary.csv",
+            file_name="master_project_extraction.csv",
             mime="text/csv",
             type="secondary"
         )
     with col_b:
-        if st.button("✅ Approve & Log Master Batch to Tracker", type="primary"):
-            st.success("Master batch table packaged and ready to sync directly to your tracking sheet!")
+        if st.button("✅ Approve & Log Master Project to Tracker", type="primary"):
+            st.success("Master project data packaged and ready to sync directly to your tracking sheet!")
