@@ -43,38 +43,49 @@ class ProjectSummary(BaseModel):
     division_32: str = Field(description="Found or Not Found")
     review_required: str = Field(description="Yes or No")
 
-# --- Helper Function: Smart PDF Slicing ---
+# --- Helper Function: Smart Capped PDF Slicing ---
 def slice_landscape_pages(input_pdf_path, output_pdf_path):
     doc = pymupdf.open(input_pdf_path)
     sliced_doc = pymupdf.Document()
-    matched_pages = []
-
-    # EXPANDED KEYWORDS: Now hunting for front-end specs, contract dates, and wage requirements
-    keywords = [
-        "PLANT SCHEDULE", "DIVISION 32", "LANDSCAPE QUANTITIES", "SUMMARY OF QUANTITIES",
-        "ADVERTISEMENT FOR BID", "AD FOR BID", "INVITATION TO BID",
-        "SUMMARY OF WORK", "CONTRACT TIME", "SUBSTANTIAL COMPLETION", "COMPLETED BY",
-        "PREVAILING WAGE", "WAGE RATE", "DAVIS-BACON", "WAGE DETERMINATION"
+    
+    landscape_keywords = [
+        "PLANT SCHEDULE", "DIVISION 32", "LANDSCAPE QUANTITIES", 
+        "SUMMARY OF QUANTITIES", "L-", "PLANTING PLAN"
     ]
+    
+    admin_keywords = [
+        "ADVERTISEMENT FOR BID", "AD FOR BID", "INVITATION TO BID",
+        "SUMMARY OF WORK", "CONTRACT TIME", "SUBSTANTIAL COMPLETION", 
+        "COMPLETED BY", "PREVAILING WAGE", "WAGE RATE", "DAVIS-BACON", 
+        "WAGE DETERMINATION"
+    ]
+
+    pages_to_keep = set()
+    admin_page_count = 0
 
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
         text = page.get_text("text").upper()
-        if any(keyword in text for keyword in keywords):
-            sliced_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
-            matched_pages.append(page_num + 1)
+        
+        # Always keep every landscape scope page
+        if any(k in text for k in landscape_keywords):
+            pages_to_keep.add(page_num)
+            
+        # Cap front-end specs at 25 pages to prevent header/footer runaway
+        elif any(k in text for k in admin_keywords):
+            if admin_page_count < 25:
+                pages_to_keep.add(page_num)
+                admin_page_count += 1
 
-    # Fallback for purely visual landscape plans
-    if len(sliced_doc) == 0:
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            text = page.get_text("text").upper()
-            if "L-" in text or "PLANTING PLAN" in text:
-                sliced_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
-                matched_pages.append(page_num + 1)
+    # Fallback if nothing matches
+    if len(pages_to_keep) == 0:
+        pages_to_keep.add(0)
+
+    for p in sorted(list(pages_to_keep)):
+        sliced_doc.insert_pdf(doc, from_page=p, to_page=p)
 
     sliced_doc.save(output_pdf_path, garbage=4, deflate=True)
-    return len(doc), len(sliced_doc), matched_pages
+    return len(doc), len(sliced_doc), sorted(list(pages_to_keep))
 
 # --- UI: Drag and Drop Area ---
 uploaded_files = st.file_uploader("Drop Bid PDF(s) (Plans or Specs)", type=["pdf"], accept_multiple_files=True)
@@ -90,8 +101,7 @@ if uploaded_files:
             results_list = []
             
             with st.spinner("Uploading large documents and processing sequentially..."):
-                # FIX: timeout is evaluated in milliseconds (600,000 ms = 10 minutes)
-                client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=600000))
+                client = genai.Client(api_key=api_key)
                 
                 for uploaded_file in uploaded_files:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
@@ -101,9 +111,9 @@ if uploaded_files:
                     temp_output_path = temp_input_path.replace(".pdf", "_sliced.pdf")
 
                     total_pgs, sliced_pgs, matched_list = slice_landscape_pages(temp_input_path, temp_output_path)
-                    st.info(f"⚡ `{uploaded_file.name}`: Filtered down to **{sliced_pgs}** core pages. Uploading to AI...")
+                    st.success(f"⚡ `{uploaded_file.name}`: Scanned {total_pgs} pages. Filtered down to **{sliced_pgs}** core pages.")
 
-                    # Safely upload chunk-by-chunk using the Files API to avoid inline memory overload
+                    # Safely upload using the Files API
                     uploaded_doc = client.files.upload(file=temp_output_path)
                     
                     # Waiting room loop to ensure Google servers fully index the file
@@ -129,18 +139,21 @@ if uploaded_files:
 
                     st.info(f"🧠 Extracting bidding data for `{uploaded_file.name}`...")
 
-                    response = client.models.generate_content(
-                        model='gemini-3.7-flash',
-                        contents=[uploaded_doc, prompt],
-                        config={
-                            'response_mime_type': 'application/json',
-                            'response_schema': ProjectSummary,
-                        }
-                    )
-
-                    result_data = response.parsed.model_dump()
-                    result_data['Source File'] = uploaded_file.name
-                    results_list.append(result_data)
+                    try:
+                        response = client.models.generate_content(
+                            model='gemini-3.7-flash',
+                            contents=[uploaded_doc, prompt],
+                            config={
+                                'response_mime_type': 'application/json',
+                                'response_schema': ProjectSummary,
+                            }
+                        )
+                        result_data = response.parsed.model_dump()
+                        result_data['Source File'] = uploaded_file.name
+                        results_list.append(result_data)
+                    except Exception as e:
+                        st.error(f"Failed to generate summary for {uploaded_file.name}. It may still be too large or complex for a single pass.")
+                        st.write(e)
 
                     # Clean up cloud file and local temp files
                     client.files.delete(name=uploaded_doc.name)
