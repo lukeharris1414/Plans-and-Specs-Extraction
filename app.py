@@ -14,12 +14,12 @@ from streamlit_gsheets import GSheetsConnection
 
 # --- Page Configuration ---
 st.set_page_config(
-    page_title="Landscape Bid Plan Extractor",
+    page_title="Plans and Specs Extraction",
     page_icon="🌿",
     layout="wide"
 )
 
-st.title("🌿 Construction Bid Plan Hub")
+st.title("🌿 Plans and Specs Extraction")
 st.markdown("Ingest construction documents, extract landscape scopes, and manage active bids across the team.")
 
 # --- API Key Setup ---
