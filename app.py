@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 import pandas as pd
 import tempfile
 import os
+import time
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -88,8 +89,9 @@ if uploaded_files:
         else:
             results_list = []
             
-            with st.spinner("Processing documents sequentially to prevent server timeouts..."):
-                client = genai.Client(api_key=api_key)
+            with st.spinner("Uploading large documents and processing sequentially..."):
+                # FIX: timeout is evaluated in milliseconds (600,000 ms = 10 minutes)
+                client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=600000))
                 
                 for uploaded_file in uploaded_files:
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
@@ -99,10 +101,20 @@ if uploaded_files:
                     temp_output_path = temp_input_path.replace(".pdf", "_sliced.pdf")
 
                     total_pgs, sliced_pgs, matched_list = slice_landscape_pages(temp_input_path, temp_output_path)
-                    st.info(f"⚡ `{uploaded_file.name}`: Filtered down to **{sliced_pgs}** core pages. Analyzing...")
+                    st.info(f"⚡ `{uploaded_file.name}`: Filtered down to **{sliced_pgs}** core pages. Uploading to AI...")
 
-                    with open(temp_output_path, "rb") as f:
-                        pdf_bytes = f.read()
+                    # Safely upload chunk-by-chunk using the Files API to avoid inline memory overload
+                    uploaded_doc = client.files.upload(file=temp_output_path)
+                    
+                    # Waiting room loop to ensure Google servers fully index the file
+                    while True:
+                        file_info = client.files.get(name=uploaded_doc.name)
+                        if "ACTIVE" in str(file_info.state):
+                            break
+                        elif "FAILED" in str(file_info.state):
+                            st.error(f"Google failed to process {uploaded_file.name}")
+                            break
+                        time.sleep(3)
 
                     prompt = f"""
                     Role: Expert Commercial Landscape Estimating AI.
@@ -115,12 +127,11 @@ if uploaded_files:
                     5. Output strictly to the structured schema provided.
                     """
 
+                    st.info(f"🧠 Extracting bidding data for `{uploaded_file.name}`...")
+
                     response = client.models.generate_content(
                         model='gemini-3.7-flash',
-                        contents=[
-                            types.Part.from_bytes(data=pdf_bytes, mime_type='application/pdf'),
-                            prompt
-                        ],
+                        contents=[uploaded_doc, prompt],
                         config={
                             'response_mime_type': 'application/json',
                             'response_schema': ProjectSummary,
@@ -131,6 +142,8 @@ if uploaded_files:
                     result_data['Source File'] = uploaded_file.name
                     results_list.append(result_data)
 
+                    # Clean up cloud file and local temp files
+                    client.files.delete(name=uploaded_doc.name)
                     if os.path.exists(temp_input_path):
                         os.remove(temp_input_path)
                     if os.path.exists(temp_output_path):
