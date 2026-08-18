@@ -8,6 +8,9 @@ import pandas as pd
 import tempfile
 import os
 import time
+import json
+from datetime import datetime
+from streamlit_gsheets import GSheetsConnection
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -16,8 +19,8 @@ st.set_page_config(
     layout="wide"
 )
 
-st.title("🌿 Construction Bid Plan Analyzer")
-st.markdown("Upload large plan sets or specification books. The app will automatically slice the landscape pages, cross-reference them, and build master project summaries and PM Bid plant schedules.")
+st.title("🌿 Construction Bid Plan Hub")
+st.markdown("Ingest construction documents, extract landscape scopes, and manage active bids across the team.")
 
 # --- API Key Setup ---
 api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Enter your Gemini API key")
@@ -75,17 +78,13 @@ def slice_landscape_pages(input_pdf_path, output_pdf_path):
         page = doc.load_page(page_num)
         text = page.get_text("text").upper()
         
-        # Always keep every landscape scope page
         if any(k in text for k in landscape_keywords):
             pages_to_keep.add(page_num)
-            
-        # Cap front-end specs at 25 pages to prevent header/footer runaway
         elif any(k in text for k in admin_keywords):
             if admin_page_count < 25:
                 pages_to_keep.add(page_num)
                 admin_page_count += 1
 
-    # Fallback if nothing matches
     if len(pages_to_keep) == 0:
         pages_to_keep.add(0)
 
@@ -95,200 +94,249 @@ def slice_landscape_pages(input_pdf_path, output_pdf_path):
     sliced_doc.save(output_pdf_path, garbage=4, deflate=True)
     return len(doc), len(sliced_doc), sorted(list(pages_to_keep))
 
-# --- UI: Drag and Drop Area ---
-uploaded_files = st.file_uploader("Drop Bid PDF(s) (Plans or Specs)", type=["pdf"], accept_multiple_files=True)
+# --- Main UI: Two Tabs ---
+tab1, tab2 = st.tabs(["🌿 Analyze New Project", "🗄️ Pending Bid Sets"])
 
-if uploaded_files:
-    file_names_str = ", ".join([f"`{f.name}`" for f in uploaded_files])
-    st.info(f"📁 **Project Files Uploaded:** {file_names_str}")
+# ==========================================
+# TAB 1: INGESTION & ANALYSIS
+# ==========================================
+with tab1:
+    uploaded_files = st.file_uploader("Drop Bid PDF(s) (Plans or Specs)", type=["pdf"], accept_multiple_files=True)
 
-    if st.button("🚀 Cross-Reference & Extract Master Project", type="primary"):
-        if not api_key:
-            st.error("Please enter a valid Gemini API Key in the sidebar.")
-        else:
-            with st.spinner("Slicing and uploading all documents to secure cloud storage..."):
-                client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=600000))
-                cloud_documents = []
-                
-                # STEP 1: Process and upload everything first
-                for uploaded_file in uploaded_files:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
-                        tmp_in.write(uploaded_file.getbuffer())
-                        temp_input_path = tmp_in.name
+    if uploaded_files:
+        file_names_str = ", ".join([f"`{f.name}`" for f in uploaded_files])
+        st.info(f"📁 **Project Files Uploaded:** {file_names_str}")
 
-                    temp_output_path = temp_input_path.replace(".pdf", "_sliced.pdf")
-
-                    total_pgs, sliced_pgs, matched_list = slice_landscape_pages(temp_input_path, temp_output_path)
-                    st.success(f"⚡ `{uploaded_file.name}` sliced from {total_pgs} to **{sliced_pgs}** core pages.")
-
-                    # Safely upload using the Files API
-                    uploaded_doc = client.files.upload(file=temp_output_path)
+        if st.button("🚀 Analyze & Auto-Log to Tracker", type="primary"):
+            if not api_key:
+                st.error("Please enter a valid Gemini API Key in the sidebar.")
+            else:
+                with st.spinner("Slicing and uploading all documents to secure cloud storage..."):
+                    client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=600000))
+                    cloud_documents = []
                     
-                    while True:
-                        file_info = client.files.get(name=uploaded_doc.name)
-                        if "ACTIVE" in str(file_info.state):
-                            cloud_documents.append(uploaded_doc)
-                            break
-                        elif "FAILED" in str(file_info.state):
-                            st.error(f"Google failed to process {uploaded_file.name}")
-                            break
-                        time.sleep(3)
+                    for uploaded_file in uploaded_files:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
+                            tmp_in.write(uploaded_file.getbuffer())
+                            temp_input_path = tmp_in.name
 
-                    # Cleanup local temp files
-                    if os.path.exists(temp_input_path): os.remove(temp_input_path)
-                    if os.path.exists(temp_output_path): os.remove(temp_output_path)
+                        temp_output_path = temp_input_path.replace(".pdf", "_sliced.pdf")
 
-                # STEP 2: Send ONE massive request to the AI with all files combined
-                st.info("🧠 All documents uploaded! Running cross-document AI analysis & building Plant Schedule...")
+                        total_pgs, sliced_pgs, matched_list = slice_landscape_pages(temp_input_path, temp_output_path)
+                        st.success(f"⚡ `{uploaded_file.name}` sliced to **{sliced_pgs}** core pages.")
 
-                prompt = f"""
-                Role: Expert Commercial Landscape Estimating AI.
-                Task: Analyze ALL attached documents together as ONE single unified construction project. Cross-reference the plans, specs, and addenda.
-                Rules:
-                1. Scope Detection: Extract exact cumulative quantities for Trees, Shrubs, and Perennials/Grasses across all documents.
-                2. Plant Schedule Extraction: Locate the most up-to-date plant schedule. Extract EVERY plant line item into the 'plant_schedule_list'. Map 'Size' to size, 'Method/Root' to type, 'Common Name' to variety, and 'Quantity' to quantity. If there are revised sheets or addenda covering the schedule, use the revised quantities. If 'Method' or 'Common Name' is missing, output 'N/A'.
-                3. Ground Covers, Plugs, and Vines must be grouped under Perennials/Grasses.
-                4. Front-End Specs: Thoroughly scan for the Master Bid Date, Substantial Completion, and Wage Rates.
-                5. Wages: Look for 'Prevailing Wage', 'Davis-Bacon', 'Union'. If not found, output 'Non-Prevailing'.
-                6. Output strictly to the structured schema provided.
-                """
-                
-                contents_payload = cloud_documents + [prompt]
-
-                # --- AUTOMATED RETRY LOOP FOR SERVER TRAFFIC JAMS ---
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        response = client.models.generate_content(
-                            model='gemini-3.7-flash',
-                            contents=contents_payload,
-                            config={
-                                'response_mime_type': 'application/json',
-                                'response_schema': ProjectSummary,
-                            }
-                        )
-                        result_data = response.parsed.model_dump()
-                        result_data['Source Files'] = file_names_str
-                        st.session_state["master_project_result"] = result_data
-                        break  # Success! Exit loop.
+                        uploaded_doc = client.files.upload(file=temp_output_path)
                         
-                    except Exception as e:
-                        error_msg = str(e).upper()
-                        if "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg:
-                            if attempt < max_retries - 1:
-                                st.warning(f"Google servers are currently busy. Retrying in 15 seconds... (Attempt {attempt + 1} of {max_retries})")
-                                time.sleep(15)
-                            else:
-                                st.error("Google servers are too busy right now. Please try again later.")
-                        else:
-                            st.error("Failed to generate master summary.")
-                            st.write(e)
+                        while True:
+                            file_info = client.files.get(name=uploaded_doc.name)
+                            if "ACTIVE" in str(file_info.state):
+                                cloud_documents.append(uploaded_doc)
+                                break
+                            elif "FAILED" in str(file_info.state):
+                                st.error(f"Google failed to process {uploaded_file.name}")
+                                break
+                            time.sleep(3)
+
+                        if os.path.exists(temp_input_path): os.remove(temp_input_path)
+                        if os.path.exists(temp_output_path): os.remove(temp_output_path)
+
+                    st.info("🧠 Running cross-document AI analysis & building Plant Schedule...")
+
+                    prompt = f"""
+                    Role: Expert Commercial Landscape Estimating AI.
+                    Task: Analyze ALL attached documents together as ONE single unified construction project.
+                    Rules:
+                    1. Scope Detection: Extract exact cumulative quantities for Trees, Shrubs, and Perennials/Grasses across all documents.
+                    2. Plant Schedule Extraction: Locate the most up-to-date plant schedule. Extract EVERY plant line item into the 'plant_schedule_list'. Map 'Size' to size, 'Method/Root' to type, 'Common Name' to variety, and 'Quantity' to quantity. If 'Method' or 'Common Name' is missing, output 'N/A'.
+                    3. Ground Covers, Plugs, and Vines must be grouped under Perennials/Grasses.
+                    4. Front-End Specs: Scan for the Master Bid Date, Substantial Completion, and Wage Rates. Output Bid Date in an easily readable format (e.g. 'Oct 15, 2026 2:00 PM').
+                    5. Wages: Look for 'Prevailing Wage', 'Davis-Bacon', 'Union'. If not found, output 'Non-Prevailing'.
+                    6. Output strictly to the structured schema provided.
+                    """
+                    
+                    contents_payload = cloud_documents + [prompt]
+                    result_data = None
+
+                    # --- AUTOMATED RETRY LOOP ---
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            response = client.models.generate_content(
+                                model='gemini-3.7-flash',
+                                contents=contents_payload,
+                                config={
+                                    'response_mime_type': 'application/json',
+                                    'response_schema': ProjectSummary,
+                                }
+                            )
+                            result_data = response.parsed.model_dump()
                             break 
+                            
+                        except Exception as e:
+                            error_msg = str(e).upper()
+                            if "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg:
+                                if attempt < max_retries - 1:
+                                    st.warning(f"Google servers busy. Retrying in 15s... (Attempt {attempt + 1}/{max_retries})")
+                                    time.sleep(15)
+                                else:
+                                    st.error("Google servers are too busy right now. Please try again later.")
+                            else:
+                                st.error("Failed to generate master summary.")
+                                st.write(e)
+                                break 
 
-                # STEP 3: Clean up cloud storage
-                for doc in cloud_documents:
-                    try:
-                        client.files.delete(name=doc.name)
-                    except:
-                        pass
+                    for doc in cloud_documents:
+                        try: client.files.delete(name=doc.name)
+                        except: pass
 
-# --- Display Master Unified Table & Plant Schedule ---
-if "master_project_result" in st.session_state:
-    data = st.session_state["master_project_result"]
-    st.divider()
+                # --- AUTOMATED DATABASE LOGGING ---
+                if result_data:
+                    with st.spinner("Connecting to Google Sheets and logging project..."):
+                        try:
+                            conn = st.connection("gsheets", type=GSheetsConnection)
+                            
+                            # Read existing data to append to it
+                            try:
+                                existing_data = conn.read(worksheet="Sheet1", ttl=0)
+                            except:
+                                existing_data = pd.DataFrame() # Fallback if sheet is totally empty
+
+                            # Generate the Project Name: "Bid Date_City"
+                            raw_date = str(result_data.get("bid_date", "Unknown Date")).replace(",", "")
+                            raw_loc = str(result_data.get("location", "Unknown Location")).split(",")[0]
+                            project_name = f"{raw_date}_{raw_loc}"
+
+                            # Package the new row
+                            new_row = {
+                                "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "Project_Name": project_name,
+                                "Source_Files": file_names_str,
+                                "Recommendation": str(result_data.get("recommendation", "N/A")),
+                                "Confidence": str(result_data.get("confidence", "0")) + "%",
+                                "Bid_Date": str(result_data.get("bid_date", "Not Found")),
+                                "Location": str(result_data.get("location", "Not Found")),
+                                "Wages": str(result_data.get("wages", "N/A")),
+                                "Trees": str(result_data.get("trees", "0")),
+                                "Shrubs": str(result_data.get("shrubs", "0")),
+                                "Perennials": str(result_data.get("perennials_and_grasses", "0")),
+                                "Seeding": str(result_data.get("seeding", "No")),
+                                "Restoration": str(result_data.get("restoration", "No")),
+                                "Irrigation": str(result_data.get("irrigation", "No")),
+                                "Landscape_Sheets": str(result_data.get("landscape_sheets", "None")),
+                                "Substantial_Completion": str(result_data.get("substantial_completion", "Not Found")),
+                                "Reasoning": str(result_data.get("reason", "")),
+                                "Plant_Schedule_JSON": json.dumps(result_data.get("plant_schedule_list", []))
+                            }
+
+                            # Append and Update
+                            new_df = pd.DataFrame([new_row])
+                            if existing_data.empty:
+                                updated_data = new_df
+                            else:
+                                updated_data = pd.concat([existing_data, new_df], ignore_index=True)
+                            
+                            conn.update(worksheet="Sheet1", data=updated_data)
+                            st.success(f"✅ **{project_name}** successfully processed and injected into the database! Head over to the 'Pending Bid Sets' tab to view it.")
+                            st.balloons()
+                            
+                        except Exception as e:
+                            st.error("AI Extracted the data, but failed to write to Google Sheets. Check your Secrets formatting and Share permissions!")
+                            st.write(e)
+
+
+# ==========================================
+# TAB 2: ACTIVE BID BOARD
+# ==========================================
+with tab2:
+    st.header("🗄️ Pending Bid Sets")
+    st.markdown("Projects extracted by the estimating team, ready for Sales & Marketing review.")
     
-    # --- SECTION 1: MASTER SUMMARY ---
-    st.subheader("📊 Master Unified Project Summary")
-    st.markdown(f"**Source Documents Analyzed:** {data.get('Source Files')}")
+    if st.button("🔄 Refresh Database", type="secondary"):
+        st.cache_data.clear() # Clears cache to pull the most recent sheet data
 
-    col1, col2, col3, col4 = st.columns(4)
-    rec = data.get("recommendation", "N/A")
-    rec_color = "green" if rec == "Qualified" else ("orange" if rec == "Review" else "red")
-    
-    col1.metric("Recommendation", f":{rec_color}[{rec}]")
-    col2.metric("Confidence", f"{data.get('confidence', 0)}%")
-    col3.metric("Wages", data.get("wages", "N/A"))
-    col4.metric("Location", data.get("location", "N/A"))
-
-    st.write(f"**Reasoning:** {data.get('reason', '')}")
-
-    # FIX: Wrap all values in str() to prevent PyArrow Mixed Type Crashes
-    table_rows = [
-        {"Category / Scope": "Trees", "Value": str(data.get("trees", 0))},
-        {"Category / Scope": "Shrubs", "Value": str(data.get("shrubs", 0))},
-        {"Category / Scope": "Perennials & Grasses", "Value": str(data.get("perennials_and_grasses", 0))},
-        {"Category / Scope": "Seeding", "Value": str(data.get("seeding", "No"))},
-        {"Category / Scope": "Restoration", "Value": str(data.get("restoration", "No"))},
-        {"Category / Scope": "Irrigation", "Value": str(data.get("irrigation", "No"))},
-        {"Category / Scope": "Bid Date", "Value": str(data.get("bid_date", "Not Found"))},
-        {"Category / Scope": "Substantial Completion", "Value": str(data.get("substantial_completion", "Not Found"))},
-        {"Category / Scope": "Landscape Sheets", "Value": str(data.get("landscape_sheets", "None"))},
-        {"Category / Scope": "Plant Schedule", "Value": str(data.get("plant_schedule", "Not Found"))},
-        {"Category / Scope": "Division 32", "Value": str(data.get("division_32", "Not Found"))},
-    ]
-
-    df = pd.DataFrame(table_rows)
-    # FIX: use width='stretch' instead of use_container_width=True
-    st.dataframe(df, width='stretch', hide_index=True)
-    
-    # --- SECTION 2: PM BID PLANT SCHEDULE ---
-    st.divider()
-    st.subheader("🌱 PM Bid Plant Schedule Export")
-    
-    plant_list = data.get("plant_schedule_list", [])
-    
-    # Safety Check: Only process if the list actually has items
-    if plant_list:
-        plant_df = pd.DataFrame(plant_list)
+    try:
+        conn = st.connection("gsheets", type=GSheetsConnection)
+        df = conn.read(worksheet="Sheet1", ttl=0) # ttl=0 forces live data pull
         
-        # Rename columns to match PM Bid format
-        plant_df.rename(columns={
-            "size": "Size", 
-            "type": "Type", 
-            "variety": "Variety", 
-            "quantity": "Quantity"
-        }, inplace=True)
-        
-        # Safety Check: Ensure all columns exist before trying to reorder them
-        expected_cols = ["Size", "Type", "Variety", "Quantity"]
-        available_cols = [col for col in expected_cols if col in plant_df.columns]
-        plant_df = plant_df[available_cols]
-        
-        # FIX: use width='stretch' instead of use_container_width=True
-        st.dataframe(plant_df, width='stretch', hide_index=True)
-        
-        # Build Download Buttons
-        col_a, col_b = st.columns(2)
-        with col_a:
-            # Plant Schedule Download
-            plant_csv = plant_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Plant Schedule (CSV)",
-                data=plant_csv,
-                file_name="pm_bid_plant_schedule.csv",
-                mime="text/csv",
-                type="primary"
-            )
-        with col_b:
-            # Master Summary Download
-            flat_data = {
-                "Source Files": data.get("Source Files"), 
-                "Recommendation": rec, 
-                "Confidence": f"{data.get('confidence', 0)}%",
-                "Location": data.get("location"),
-                "Wages": data.get("wages")
-            }
-            for row in table_rows:
-                flat_data[row["Category / Scope"]] = row["Value"]
-            master_df = pd.DataFrame([flat_data])
+        if df.empty or "Project_Name" not in df.columns:
+            st.info("No projects have been logged yet. Upload a bid set in the first tab to get started!")
+        else:
+            # Drop empty rows that Google Sheets sometimes creates
+            df = df.dropna(subset=["Project_Name"])
             
-            summary_csv = master_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Download Master Summary (CSV)",
-                data=summary_csv,
-                file_name="master_project_extraction.csv",
-                mime="text/csv",
-                type="secondary"
-            )
-    else:
-        st.warning("No plant schedule items were found or successfully extracted from these documents.")
+            # --- Auto-Sorting Dates ---
+            active_bids = []
+            expired_bids = []
+            
+            for index, row in df.iterrows():
+                bid_date_str = str(row["Bid_Date"])
+                is_expired = False
+                
+                # Attempt to parse date to see if it has passed
+                try:
+                    # Very basic fuzzy parsing check for standard dates
+                    parsed_date = pd.to_datetime(bid_date_str, fuzzy=True)
+                    if parsed_date < datetime.now():
+                        is_expired = True
+                except:
+                    # If AI returned text like "Next Tuesday" or "Not Found", keep it in Active
+                    pass
+                
+                if is_expired:
+                    expired_bids.append(row)
+                else:
+                    active_bids.append(row)
+
+            # --- Render Active Bids ---
+            st.subheader(f"🟢 Active Projects ({len(active_bids)})")
+            for row in reversed(active_bids): # Show newest first
+                with st.expander(f"🏗️ {row['Project_Name']} | Logged: {row.get('Timestamp', 'Unknown')}", expanded=False):
+                    
+                    # Top Metrics
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Recommendation", row.get("Recommendation", "N/A"))
+                    c2.metric("Bid Date", row.get("Bid_Date", "N/A"))
+                    c3.metric("Wages", row.get("Wages", "N/A"))
+                    c4.metric("Location", row.get("Location", "N/A"))
+                    
+                    st.write(f"**Reasoning:** {row.get('Reasoning', '')}")
+                    
+                    # Project Quantities Table
+                    st.markdown("**Project Scope Overview**")
+                    scope_data = {
+                        "Trees": row.get("Trees", "0"),
+                        "Shrubs": row.get("Shrubs", "0"),
+                        "Perennials": row.get("Perennials", "0"),
+                        "Seeding": row.get("Seeding", "No"),
+                        "Restoration": row.get("Restoration", "No"),
+                        "Irrigation": row.get("Irrigation", "No"),
+                        "Landscape Sheets": row.get("Landscape_Sheets", "None"),
+                        "Completion": row.get("Substantial_Completion", "Not Found")
+                    }
+                    st.dataframe(pd.DataFrame([scope_data]), width='stretch', hide_index=True)
+                    
+                    # Extracted Plant Schedule
+                    st.markdown("**PM Bid Plant Schedule**")
+                    try:
+                        raw_json = row.get("Plant_Schedule_JSON", "[]")
+                        plant_list = json.loads(raw_json)
+                        if plant_list:
+                            plant_df = pd.DataFrame(plant_list)
+                            plant_df.rename(columns={"size": "Size", "type": "Type", "variety": "Variety", "quantity": "Quantity"}, inplace=True)
+                            expected_cols = ["Size", "Type", "Variety", "Quantity"]
+                            available_cols = [col for col in expected_cols if col in plant_df.columns]
+                            st.dataframe(plant_df[available_cols], width='stretch', hide_index=True)
+                        else:
+                            st.warning("No plant schedule items found for this project.")
+                    except:
+                        st.error("Could not load plant schedule data.")
+            
+            # --- Render Expired Bids ---
+            st.write("---")
+            with st.expander(f"🔴 Expired / Past Bids ({len(expired_bids)})"):
+                for row in reversed(expired_bids):
+                    st.write(f"**{row['Project_Name']}** (Bid Date: {row['Bid_Date']})")
+
+    except Exception as e:
+        st.warning("Could not connect to the database. Make sure your Streamlit Secrets and Google Sheet sharing permissions are correct.")
+        st.write(e)
