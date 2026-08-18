@@ -16,7 +16,7 @@ st.set_page_config(
 )
 
 st.title("🌿 Construction Bid Plan Analyzer")
-st.markdown("Upload large plan sets or specification books. The app will automatically slice the landscape pages and cross-reference them to build ONE master project summary table.")
+st.markdown("Upload large plan sets or specification books. The app will automatically slice the landscape pages, cross-reference them, and build master project summaries and PM Bid plant schedules.")
 
 # --- API Key Setup ---
 api_key = st.sidebar.text_input("Gemini API Key", type="password", help="Enter your Gemini API key")
@@ -24,6 +24,12 @@ if not api_key:
     api_key = os.environ.get("GEMINI_API_KEY", "")
 
 # --- Schema Definition for Structured Output ---
+class PlantItem(BaseModel):
+    size: str = Field(description="Size (Ex: 1.5\" CAL, #15, 4\", 18\", 24\" HT, 2\" CAL)")
+    type: str = Field(description="Type or Method (Ex: BR, CONT, B&B, SP)")
+    variety: str = Field(description="Variety or Common Name (Ex: Bur Oak, Froebel Spirea)")
+    quantity: int = Field(description="Quantity")
+
 class ProjectSummary(BaseModel):
     recommendation: str = Field(description="Output: Qualified, Review, or Reject")
     confidence: int = Field(description="Confidence percentage from 0-100")
@@ -42,6 +48,7 @@ class ProjectSummary(BaseModel):
     plant_schedule: str = Field(description="Found or Not Found")
     division_32: str = Field(description="Found or Not Found")
     review_required: str = Field(description="Yes or No")
+    plant_schedule_list: list[PlantItem] = Field(description="List of all plants extracted from the most up-to-date plant schedule.")
 
 # --- Helper Function: Smart Capped PDF Slicing ---
 def slice_landscape_pages(input_pdf_path, output_pdf_path):
@@ -131,20 +138,20 @@ if uploaded_files:
                     if os.path.exists(temp_output_path): os.remove(temp_output_path)
 
                 # STEP 2: Send ONE massive request to the AI with all files combined
-                st.info("🧠 All documents uploaded! Running cross-document AI analysis...")
+                st.info("🧠 All documents uploaded! Running cross-document AI analysis & building Plant Schedule...")
 
                 prompt = f"""
                 Role: Expert Commercial Landscape Estimating AI.
                 Task: Analyze ALL attached documents together as ONE single unified construction project. Cross-reference the plans, specs, and addenda.
                 Rules:
                 1. Scope Detection: Extract exact cumulative quantities for Trees, Shrubs, and Perennials/Grasses across all documents.
-                2. Ground Covers, Plugs, and Vines must be grouped under Perennials/Grasses.
-                3. Front-End Specs: Thoroughly scan for the Master Bid Date, Substantial Completion, and Wage Rates.
-                4. Wages: Look for 'Prevailing Wage', 'Davis-Bacon', 'Union'. If not found, output 'Non-Prevailing'.
-                5. Output strictly to the structured schema provided.
+                2. Plant Schedule Extraction: Locate the most up-to-date plant schedule. Extract EVERY plant line item into the 'plant_schedule_list'. Map 'Size' to size, 'Method/Root' to type, 'Common Name' to variety, and 'Quantity' to quantity. If there are revised sheets or addenda covering the schedule, use the revised quantities.
+                3. Ground Covers, Plugs, and Vines must be grouped under Perennials/Grasses.
+                4. Front-End Specs: Thoroughly scan for the Master Bid Date, Substantial Completion, and Wage Rates.
+                5. Wages: Look for 'Prevailing Wage', 'Davis-Bacon', 'Union'. If not found, output 'Non-Prevailing'.
+                6. Output strictly to the structured schema provided.
                 """
                 
-                # Combine all uploaded files and the prompt into one payload
                 contents_payload = cloud_documents + [prompt]
 
                 # --- AUTOMATED RETRY LOOP FOR SERVER TRAFFIC JAMS ---
@@ -184,10 +191,12 @@ if uploaded_files:
                     except:
                         pass
 
-# --- Display Master Unified Table ---
+# --- Display Master Unified Table & Plant Schedule ---
 if "master_project_result" in st.session_state:
     data = st.session_state["master_project_result"]
     st.divider()
+    
+    # --- SECTION 1: MASTER SUMMARY ---
     st.subheader("📊 Master Unified Project Summary")
     st.markdown(f"**Source Documents Analyzed:** {data.get('Source Files')}")
 
@@ -219,30 +228,58 @@ if "master_project_result" in st.session_state:
     df = pd.DataFrame(table_rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
     
-    # Format flat row for export
-    flat_data = {
-        "Source Files": data.get("Source Files"), 
-        "Recommendation": rec, 
-        "Confidence": f"{data.get('confidence', 0)}%",
-        "Location": data.get("location"),
-        "Wages": data.get("wages")
-    }
-    for row in table_rows:
-        flat_data[row["Category / Scope"]] = row["Value"]
-    
-    master_df = pd.DataFrame([flat_data])
-
+    # --- SECTION 2: PM BID PLANT SCHEDULE ---
     st.divider()
-    col_a, col_b = st.columns(2)
-    with col_a:
-        csv_data = master_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Master Project Summary (CSV)",
-            data=csv_data,
-            file_name="master_project_extraction.csv",
-            mime="text/csv",
-            type="secondary"
-        )
-    with col_b:
-        if st.button("✅ Approve & Log Master Project to Tracker", type="primary"):
-            st.success("Master project data packaged and ready to sync directly to your tracking sheet!")
+    st.subheader("🌱 PM Bid Plant Schedule Export")
+    
+    plant_list = data.get("plant_schedule_list", [])
+    if plant_list:
+        # Convert to DataFrame and enforce strict column naming/ordering
+        plant_df = pd.DataFrame(plant_list)
+        plant_df.rename(columns={
+            "size": "Size", 
+            "type": "Type", 
+            "variety": "Variety", 
+            "quantity": "Quantity"
+        }, inplace=True)
+        
+        # Ensure exact column order for PM Bid tab
+        plant_df = plant_df[["Size", "Type", "Variety", "Quantity"]]
+        
+        st.dataframe(plant_df, use_container_width=True, hide_index=True)
+        
+        # Build Download Buttons
+        col_a, col_b = st.columns(2)
+        with col_a:
+            # Plant Schedule Download
+            plant_csv = plant_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Plant Schedule (CSV)",
+                data=plant_csv,
+                file_name="pm_bid_plant_schedule.csv",
+                mime="text/csv",
+                type="primary"
+            )
+        with col_b:
+            # Master Summary Download
+            flat_data = {
+                "Source Files": data.get("Source Files"), 
+                "Recommendation": rec, 
+                "Confidence": f"{data.get('confidence', 0)}%",
+                "Location": data.get("location"),
+                "Wages": data.get("wages")
+            }
+            for row in table_rows:
+                flat_data[row["Category / Scope"]] = row["Value"]
+            master_df = pd.DataFrame([flat_data])
+            
+            summary_csv = master_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Download Master Summary (CSV)",
+                data=summary_csv,
+                file_name="master_project_extraction.csv",
+                mime="text/csv",
+                type="secondary"
+            )
+    else:
+        st.warning("No plant schedule items were found or successfully extracted from these documents.")
