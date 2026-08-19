@@ -23,7 +23,7 @@ st.title("🌿 Plans and Specs Extraction")
 st.markdown("Ingest construction documents, extract landscape scopes, and manage active bids across the team.")
 
 # --- API Key Setup ---
-api_key = st.secrets["GEMINI_API_KEY"  # <--- THIS IS THE CRITICAL LINE
+api_key = st.secrets["GEMINI_API_KEY"]  # <--- THIS IS THE CRITICAL LINE
 
 # --- Schema Definition for Structured Output ---
 class PlantItem(BaseModel):
