@@ -80,7 +80,6 @@ def slice_landscape_pages(input_pdf_path, output_pdf_path):
         text = page.get_text("text").upper()
         
         # --- OPTIMIZED OCR FALLBACK ---
-        # Lowered to 150 to prevent unnecessary OCR scanning on pages with minimal text, speeding up the app.
         if len(text.strip()) < 150:
             try:
                 pix = page.get_pixmap(dpi=150) 
@@ -169,35 +168,46 @@ with tab1:
                     contents_payload = cloud_documents + [prompt]
                     result_data = None
 
-                    # --- AUTOMATED RETRY LOOP (EXPONENTIAL BACKOFF) ---
-                    max_retries = 5
-                    for attempt in range(max_retries):
-                        try:
-                            response = client.models.generate_content(
-                                model='gemini-3.6-flash',
-                                contents=contents_payload,
-                                config={
-                                    'response_mime_type': 'application/json',
-                                    'response_schema': ProjectSummary,
-                                }
-                            )
-                            result_data = response.parsed.model_dump()
-                            break 
+                    # --- AUTOMATED MODEL FALLBACK & RETRY LOOP ---
+                    models_to_try = ['gemini-3.7-flash', 'gemini-3.6-flash']
+                    
+                    for model_name in models_to_try:
+                        if result_data:
+                            break # If it succeeded, stop trying other models
                             
-                        except Exception as e:
-                            error_msg = str(e).upper()
-                            if "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg or "QUOTA" in error_msg:
-                                if attempt < max_retries - 1:
-                                    # Exponential backoff: 10s, 20s, 40s, 80s + slight randomness to clear traffic
-                                    sleep_time = (2 ** attempt) * 10 + random.randint(1, 5)
-                                    st.warning(f"API Quota limits reached. Backing off for {sleep_time}s to reset... (Attempt {attempt + 1}/{max_retries})")
-                                    time.sleep(sleep_time)
+                        st.info(f"🧠 Attempting extraction using {model_name}...")
+                        max_retries = 3
+                        
+                        for attempt in range(max_retries):
+                            try:
+                                response = client.models.generate_content(
+                                    model=model_name,
+                                    contents=contents_payload,
+                                    config={
+                                        'response_mime_type': 'application/json',
+                                        'response_schema': ProjectSummary,
+                                    }
+                                )
+                                result_data = response.parsed.model_dump()
+                                break # Break the retry loop on success
+                                
+                            except Exception as e:
+                                error_msg = str(e).upper()
+                                if "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg or "QUOTA" in error_msg:
+                                    if attempt < max_retries - 1:
+                                        sleep_time = (2 ** attempt) * 10 + random.randint(1, 5)
+                                        st.warning(f"Traffic limits hit on {model_name}. Pausing for {sleep_time}s... (Attempt {attempt + 1}/{max_retries})")
+                                        time.sleep(sleep_time)
+                                    else:
+                                        st.error(f"{model_name} daily quota exhausted. Switching to fallback model...")
+                                        # This inner loop ends here, and the outer loop moves to the next model (3.6)
                                 else:
-                                    st.error("API Quota exceeded. Please upgrade your Gemini API key to a Pay-As-You-Go tier in Google AI Studio.")
-                            else:
-                                st.error("Failed to generate master summary.")
-                                st.write(e)
-                                break 
+                                    st.error(f"Failed to generate summary with {model_name}.")
+                                    st.write(e)
+                                    break # Exit inner retry loop on unknown errors
+
+                    if not result_data:
+                        st.error("🚨 All AI models have exhausted their free daily quotas. You must wait 24 hours to process more projects.")
 
                     for doc in cloud_documents:
                         try: client.files.delete(name=doc.name)
