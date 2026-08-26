@@ -319,7 +319,7 @@ with tab2:
             # --- ACTIVE BIDS RENDERING ---
             st.subheader(f"🟢 Active Projects ({len(active_bids)})")
             for idx, row in reversed(active_bids): 
-                with st.expander(f"🏗️ {row['Project_Name']} | Logged: {row.get('Timestamp', 'Unknown')}", expanded=False):
+                with st.expander(f"{row['Project_Name']} | Logged: {row.get('Timestamp', 'Unknown')}", expanded=False):
                     
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Recommendation", row.get("Recommendation", "N/A"))
@@ -378,7 +378,7 @@ with tab2:
                         st.rerun()
                 
                 for idx, row in reversed(expired_bids):
-                    with st.expander(f"🏗️ {row['Project_Name']} | Logged: {row.get('Timestamp', 'Unknown')}", expanded=False):
+                    with st.expander(f"{row['Project_Name']} | Logged: {row.get('Timestamp', 'Unknown')}", expanded=False):
                         
                         c1, c2, c3, c4 = st.columns(4)
                         c1.metric("Recommendation", row.get("Recommendation", "N/A"))
