@@ -123,6 +123,7 @@ with tab1:
                 st.error("Please enter a valid Gemini API Key in the sidebar.")
             else:
                 with st.spinner("Slicing and uploading all documents to secure cloud storage..."):
+                    # Use a generous timeout for the initial file uploads so large PDFs don't fail here
                     client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=600000))
                     cloud_documents = []
                     
@@ -168,19 +169,28 @@ with tab1:
                     contents_payload = cloud_documents + [prompt]
                     result_data = None
 
-                    # --- AUTOMATED MODEL FALLBACK & RETRY LOOP ---
-                    models_to_try = ['gemini-3.7-flash', 'gemini-3.6-flash']
+                    # --- DYNAMIC TIMEOUT & MODEL FALLBACK LOOP ---
+                    models_to_try = [
+                        {'name': 'gemini-3.7-flash', 'timeout': 120000}, # 2-minute strict timeout
+                        {'name': 'gemini-3.6-flash', 'timeout': 300000}  # 5-minute fallback timeout
+                    ]
                     
-                    for model_name in models_to_try:
+                    for model_config in models_to_try:
                         if result_data:
-                            break # If it succeeded, stop trying other models
+                            break 
                             
+                        model_name = model_config['name']
+                        model_timeout = model_config['timeout']
+                        
                         st.info(f"🧠 Attempting extraction using {model_name}...")
+                        
+                        # Create a new client specifically with this model's timeout rules
+                        gen_client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=model_timeout))
                         max_retries = 3
                         
                         for attempt in range(max_retries):
                             try:
-                                response = client.models.generate_content(
+                                response = gen_client.models.generate_content(
                                     model=model_name,
                                     contents=contents_payload,
                                     config={
@@ -189,25 +199,31 @@ with tab1:
                                     }
                                 )
                                 result_data = response.parsed.model_dump()
-                                break # Break the retry loop on success
+                                break 
                                 
                             except Exception as e:
                                 error_msg = str(e).upper()
-                                if "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg or "QUOTA" in error_msg:
+                                
+                                # Catch specifically if the model froze and hit our time limit
+                                if "TIMEOUT" in error_msg or "DEADLINE" in error_msg or "READ TIMEOUT" in error_msg:
+                                    st.warning(f"⏳ {model_name} timed out after {model_timeout // 60000} minutes. Switching to fallback model...")
+                                    break # Instantly break the inner retry loop so it moves to 3.6
+                                    
+                                elif "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg or "QUOTA" in error_msg:
                                     if attempt < max_retries - 1:
                                         sleep_time = (2 ** attempt) * 10 + random.randint(1, 5)
                                         st.warning(f"Traffic limits hit on {model_name}. Pausing for {sleep_time}s... (Attempt {attempt + 1}/{max_retries})")
                                         time.sleep(sleep_time)
                                     else:
                                         st.error(f"{model_name} daily quota exhausted. Switching to fallback model...")
-                                        # This inner loop ends here, and the outer loop moves to the next model (3.6)
+                                        break
                                 else:
                                     st.error(f"Failed to generate summary with {model_name}.")
                                     st.write(e)
-                                    break # Exit inner retry loop on unknown errors
+                                    break 
 
                     if not result_data:
-                        st.error("🚨 All AI models have exhausted their free daily quotas. You must wait 24 hours to process more projects.")
+                        st.error("🚨 All AI models failed or exhausted their quotas. Please try again later.")
 
                     for doc in cloud_documents:
                         try: client.files.delete(name=doc.name)
@@ -219,18 +235,15 @@ with tab1:
                         try:
                             conn = st.connection("gsheets", type=GSheetsConnection)
                             
-                            # Read existing data to append to it
                             try:
                                 existing_data = conn.read(worksheet="Sheet1", ttl=0)
                             except:
-                                existing_data = pd.DataFrame() # Fallback if sheet is totally empty
+                                existing_data = pd.DataFrame() 
 
-                            # Generate the Project Name: "Bid Date_City"
                             raw_date = str(result_data.get("bid_date", "Unknown Date")).replace(",", "")
                             raw_loc = str(result_data.get("location", "Unknown Location")).split(",")[0]
                             project_name = f"{raw_date}_{raw_loc}"
 
-                            # Package the new row
                             new_row = {
                                 "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                                 "Project_Name": project_name,
@@ -252,7 +265,6 @@ with tab1:
                                 "Plant_Schedule_JSON": json.dumps(result_data.get("plant_schedule_list", []))
                             }
 
-                            # Append and Update
                             new_df = pd.DataFrame([new_row])
                             if existing_data.empty:
                                 updated_data = new_df
@@ -275,19 +287,17 @@ with tab2:
     st.markdown("Projects extracted by the estimating team, ready for Sales & Marketing review.")
     
     if st.button("🔄 Refresh Database", type="secondary"):
-        st.cache_data.clear() # Clears cache to pull the most recent sheet data
+        st.cache_data.clear() 
 
     try:
         conn = st.connection("gsheets", type=GSheetsConnection)
-        df = conn.read(worksheet="Sheet1", ttl=0) # ttl=0 forces live data pull
+        df = conn.read(worksheet="Sheet1", ttl=0) 
         
         if df.empty or "Project_Name" not in df.columns:
             st.info("No projects have been logged yet. Upload a bid set in the first tab to get started!")
         else:
-            # Drop empty rows that Google Sheets sometimes creates
             df = df.dropna(subset=["Project_Name"])
             
-            # --- Auto-Sorting Dates ---
             active_bids = []
             expired_bids = []
             
@@ -295,14 +305,11 @@ with tab2:
                 bid_date_str = str(row["Bid_Date"])
                 is_expired = False
                 
-                # Attempt to parse date to see if it has passed
                 try:
-                    # Very basic fuzzy parsing check for standard dates
                     parsed_date = pd.to_datetime(bid_date_str, fuzzy=True)
                     if parsed_date < datetime.now():
                         is_expired = True
                 except:
-                    # If AI returned text like "Next Tuesday" or "Not Found", keep it in Active
                     pass
                 
                 if is_expired:
@@ -310,12 +317,10 @@ with tab2:
                 else:
                     active_bids.append(row)
 
-            # --- Render Active Bids ---
             st.subheader(f"🟢 Active Projects ({len(active_bids)})")
-            for row in reversed(active_bids): # Show newest first
+            for row in reversed(active_bids): 
                 with st.expander(f"🏗️ {row['Project_Name']} | Logged: {row.get('Timestamp', 'Unknown')}", expanded=False):
                     
-                    # Top Metrics
                     c1, c2, c3, c4 = st.columns(4)
                     c1.metric("Recommendation", row.get("Recommendation", "N/A"))
                     c2.metric("Bid Date", row.get("Bid_Date", "N/A"))
@@ -324,7 +329,6 @@ with tab2:
                     
                     st.write(f"**Reasoning:** {row.get('Reasoning', '')}")
                     
-                    # Project Quantities Table
                     st.markdown("**Project Scope Overview**")
                     scope_data = {
                         "Trees": row.get("Trees", "0"),
@@ -338,7 +342,6 @@ with tab2:
                     }
                     st.dataframe(pd.DataFrame([scope_data]), width='stretch', hide_index=True)
                     
-                    # Extracted Plant Schedule
                     st.markdown("**PM Bid Plant Schedule**")
                     try:
                         raw_json = row.get("Plant_Schedule_JSON", "[]")
@@ -354,7 +357,6 @@ with tab2:
                     except:
                         st.error("Could not load plant schedule data.")
             
-            # --- Render Expired Bids ---
             st.write("---")
             with st.expander(f"🔴 Expired / Past Bids ({len(expired_bids)})"):
                 for row in reversed(expired_bids):
