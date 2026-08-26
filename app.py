@@ -305,19 +305,18 @@ with tab2:
                 is_expired = False
                 
                 try:
-                    # Updated parser logic using pandas directly
                     parsed_date = pd.to_datetime(bid_date_str, errors='coerce')
                     if pd.notna(parsed_date) and parsed_date < now:
                         is_expired = True
                 except:
                     pass
                 
-                # We store the dataframe index along with the row so we can delete it easily
                 if is_expired:
                     expired_bids.append((index, row))
                 else:
                     active_bids.append((index, row))
 
+            # --- ACTIVE BIDS RENDERING ---
             st.subheader(f"🟢 Active Projects ({len(active_bids)})")
             for idx, row in reversed(active_bids): 
                 with st.expander(f"🏗️ {row['Project_Name']} | Logged: {row.get('Timestamp', 'Unknown')}", expanded=False):
@@ -330,7 +329,6 @@ with tab2:
                     
                     st.write(f"**Reasoning:** {row.get('Reasoning', '')}")
                     
-                    # --- NEW REJECT BUTTON ---
                     if st.button("❌ Reject Project", key=f"reject_active_{idx}"):
                         with st.spinner("Removing project from database..."):
                             df = df.drop(idx)
@@ -366,19 +364,64 @@ with tab2:
                     except:
                         st.error("Could not load plant schedule data.")
             
+            # --- EXPIRED BIDS RENDERING ---
             st.write("---")
-            with st.expander(f"🔴 Expired / Past Bids ({len(expired_bids)})"):
+            st.subheader(f"🔴 Expired / Past Bids ({len(expired_bids)})")
+            
+            if len(expired_bids) > 0:
+                if st.button("🗑️ Remove All Bids from History"):
+                    with st.spinner("Clearing all expired projects..."):
+                        indices_to_drop = [idx for idx, row in expired_bids]
+                        df = df.drop(indices_to_drop)
+                        conn.update(worksheet="Sheet1", data=df)
+                        st.cache_data.clear()
+                        st.rerun()
+                
                 for idx, row in reversed(expired_bids):
-                    st.write(f"**{row['Project_Name']}** (Bid Date: {row['Bid_Date']})")
-                    
-                    # Optional: Allow rejecting expired projects too to clean up the sheet
-                    if st.button("❌ Remove from History", key=f"reject_expired_{idx}"):
-                        with st.spinner("Removing project..."):
-                            df = df.drop(idx)
-                            conn.update(worksheet="Sheet1", data=df)
-                            st.cache_data.clear()
-                            st.rerun()
-                            st.write("---")
+                    with st.expander(f"🏗️ {row['Project_Name']} | Logged: {row.get('Timestamp', 'Unknown')}", expanded=False):
+                        
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Recommendation", row.get("Recommendation", "N/A"))
+                        c2.metric("Bid Date", row.get("Bid_Date", "N/A"))
+                        c3.metric("Wages", row.get("Wages", "N/A"))
+                        c4.metric("Location", row.get("Location", "N/A"))
+                        
+                        st.write(f"**Reasoning:** {row.get('Reasoning', '')}")
+                        
+                        if st.button("❌ Remove from History", key=f"reject_expired_{idx}"):
+                            with st.spinner("Removing project from database..."):
+                                df = df.drop(idx)
+                                conn.update(worksheet="Sheet1", data=df)
+                                st.cache_data.clear()
+                                st.rerun()
+                        
+                        st.markdown("**Project Scope Overview**")
+                        scope_data = {
+                            "Trees": row.get("Trees", "0"),
+                            "Shrubs": row.get("Shrubs", "0"),
+                            "Perennials": row.get("Perennials", "0"),
+                            "Seeding": row.get("Seeding", "No"),
+                            "Restoration": row.get("Restoration", "No"),
+                            "Irrigation": row.get("Irrigation", "No"),
+                            "Landscape Sheets": row.get("Landscape_Sheets", "None"),
+                            "Completion": row.get("Substantial_Completion", "Not Found")
+                        }
+                        st.dataframe(pd.DataFrame([scope_data]), width='stretch', hide_index=True)
+                        
+                        st.markdown("**PM Bid Plant Schedule**")
+                        try:
+                            raw_json = row.get("Plant_Schedule_JSON", "[]")
+                            plant_list = json.loads(raw_json)
+                            if plant_list:
+                                plant_df = pd.DataFrame(plant_list)
+                                plant_df.rename(columns={"size": "Size", "type": "Type", "variety": "Variety", "quantity": "Quantity"}, inplace=True)
+                                expected_cols = ["Size", "Type", "Variety", "Quantity"]
+                                available_cols = [col for col in expected_cols if col in plant_df.columns]
+                                st.dataframe(plant_df[available_cols], width='stretch', hide_index=True)
+                            else:
+                                st.warning("No plant schedule items found for this project.")
+                        except:
+                            st.error("Could not load plant schedule data.")
 
     except Exception as e:
         st.warning("Could not connect to the database. Make sure your Streamlit Secrets and Google Sheet sharing permissions are correct.")
