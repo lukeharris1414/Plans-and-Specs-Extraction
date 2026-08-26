@@ -61,7 +61,7 @@ def slice_landscape_pages(input_pdf_path, output_pdf_path):
     
     landscape_keywords = [
         "PLANT SCHEDULE", "DIVISION 32", "LANDSCAPE QUANTITIES", 
-        "SUMMARY OF QUANTITIES", "L-", "PLANTING PLAN"
+        "SUMMARY OF QUANTITIES", "L-", "PLANTING PLAN", "MASTER PLANT SCHEDULE", "PLANT"
     ]
     
     admin_keywords = [
@@ -78,15 +78,17 @@ def slice_landscape_pages(input_pdf_path, output_pdf_path):
         page = doc.load_page(page_num)
         text = page.get_text("text").upper()
         
-        # --- SMART OCR FALLBACK ---
-        # If the page has no digital text, it is likely a scanned image.
-        if len(text.strip()) < 50:
-            # Convert the PDF page into an image
-            pix = page.get_pixmap(dpi=150) 
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            # Run the image through the OCR engine to extract the text
-            text = pytesseract.image_to_string(img).upper()
-        # --------------------------
+        # --- AGGRESSIVE OCR FALLBACK ---
+        # If the page has less than 400 digital characters, it is likely a flattened image or scan.
+        if len(text.strip()) < 400:
+            try:
+                pix = page.get_pixmap(dpi=150) 
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                # Append the OCR text to whatever digital text already existed
+                text += " " + pytesseract.image_to_string(img).upper()
+            except Exception as e:
+                pass # If OCR fails, ignore and move on
+        # -------------------------------
         
         if any(k in text for k in landscape_keywords):
             pages_to_keep.add(page_num)
@@ -152,7 +154,7 @@ with tab1:
 
                     st.info("🧠 Running cross-document AI analysis & building Plant Schedule...")
 
-                    prompt = f"""
+                    prompt = """
                     Role: Expert Commercial Landscape Estimating AI.
                     Task: Analyze ALL attached documents together as ONE single unified construction project.
                     Rules:
