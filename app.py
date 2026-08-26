@@ -1,5 +1,7 @@
 import streamlit as st
 import pymupdf
+import pytesseract
+from PIL import Image
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
@@ -75,6 +77,16 @@ def slice_landscape_pages(input_pdf_path, output_pdf_path):
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
         text = page.get_text("text").upper()
+        
+        # --- SMART OCR FALLBACK ---
+        # If the page has no digital text, it is likely a scanned image.
+        if len(text.strip()) < 50:
+            # Convert the PDF page into an image
+            pix = page.get_pixmap(dpi=150) 
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            # Run the image through the OCR engine to extract the text
+            text = pytesseract.image_to_string(img).upper()
+        # --------------------------
         
         if any(k in text for k in landscape_keywords):
             pages_to_keep.add(page_num)
