@@ -123,7 +123,6 @@ with tab1:
                 st.error("Please enter a valid Gemini API Key in the sidebar.")
             else:
                 with st.spinner("Slicing and uploading all documents to secure cloud storage..."):
-                    # Use a generous timeout for the initial file uploads so large PDFs don't fail here
                     client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=600000))
                     cloud_documents = []
                     
@@ -184,7 +183,6 @@ with tab1:
                         
                         st.info(f"🧠 Attempting extraction using {model_name}...")
                         
-                        # Create a new client specifically with this model's timeout rules
                         gen_client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=model_timeout))
                         max_retries = 3
                         
@@ -204,10 +202,9 @@ with tab1:
                             except Exception as e:
                                 error_msg = str(e).upper()
                                 
-                                # Catch specifically if the model froze and hit our time limit
                                 if "TIMEOUT" in error_msg or "DEADLINE" in error_msg or "READ TIMEOUT" in error_msg:
                                     st.warning(f"⏳ {model_name} timed out after {model_timeout // 60000} minutes. Switching to fallback model...")
-                                    break # Instantly break the inner retry loop so it moves to 3.6
+                                    break 
                                     
                                 elif "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg or "QUOTA" in error_msg:
                                     if attempt < max_retries - 1:
@@ -298,27 +295,31 @@ with tab2:
         else:
             df = df.dropna(subset=["Project_Name"])
             
+            # --- Auto-Sorting Dates ---
             active_bids = []
             expired_bids = []
+            now = datetime.now()
             
             for index, row in df.iterrows():
                 bid_date_str = str(row["Bid_Date"])
                 is_expired = False
                 
                 try:
-                    parsed_date = pd.to_datetime(bid_date_str, fuzzy=True)
-                    if parsed_date < datetime.now():
+                    # Updated parser logic using pandas directly
+                    parsed_date = pd.to_datetime(bid_date_str, errors='coerce')
+                    if pd.notna(parsed_date) and parsed_date < now:
                         is_expired = True
                 except:
                     pass
                 
+                # We store the dataframe index along with the row so we can delete it easily
                 if is_expired:
-                    expired_bids.append(row)
+                    expired_bids.append((index, row))
                 else:
-                    active_bids.append(row)
+                    active_bids.append((index, row))
 
             st.subheader(f"🟢 Active Projects ({len(active_bids)})")
-            for row in reversed(active_bids): 
+            for idx, row in reversed(active_bids): 
                 with st.expander(f"🏗️ {row['Project_Name']} | Logged: {row.get('Timestamp', 'Unknown')}", expanded=False):
                     
                     c1, c2, c3, c4 = st.columns(4)
@@ -328,6 +329,14 @@ with tab2:
                     c4.metric("Location", row.get("Location", "N/A"))
                     
                     st.write(f"**Reasoning:** {row.get('Reasoning', '')}")
+                    
+                    # --- NEW REJECT BUTTON ---
+                    if st.button("❌ Reject Project", key=f"reject_active_{idx}"):
+                        with st.spinner("Removing project from database..."):
+                            df = df.drop(idx)
+                            conn.update(worksheet="Sheet1", data=df)
+                            st.cache_data.clear()
+                            st.rerun()
                     
                     st.markdown("**Project Scope Overview**")
                     scope_data = {
@@ -359,8 +368,17 @@ with tab2:
             
             st.write("---")
             with st.expander(f"🔴 Expired / Past Bids ({len(expired_bids)})"):
-                for row in reversed(expired_bids):
+                for idx, row in reversed(expired_bids):
                     st.write(f"**{row['Project_Name']}** (Bid Date: {row['Bid_Date']})")
+                    
+                    # Optional: Allow rejecting expired projects too to clean up the sheet
+                    if st.button("❌ Remove from History", key=f"reject_expired_{idx}"):
+                        with st.spinner("Removing project..."):
+                            df = df.drop(idx)
+                            conn.update(worksheet="Sheet1", data=df)
+                            st.cache_data.clear()
+                            st.rerun()
+                            st.write("---")
 
     except Exception as e:
         st.warning("Could not connect to the database. Make sure your Streamlit Secrets and Google Sheet sharing permissions are correct.")
