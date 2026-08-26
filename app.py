@@ -12,6 +12,7 @@ import os
 import time
 import json
 from datetime import datetime
+import random
 from streamlit_gsheets import GSheetsConnection
 
 # --- Page Configuration ---
@@ -25,7 +26,7 @@ st.title("🌿 Plans and Specs Extraction")
 st.markdown("Ingest construction documents, extract landscape scopes, and manage active bids across the team.")
 
 # --- API Key Setup ---
-api_key = st.secrets["GEMINI_API_KEY"]  # <--- THIS IS THE CRITICAL LINE
+api_key = st.secrets["GEMINI_API_KEY"]  
 
 # --- Schema Definition for Structured Output ---
 class PlantItem(BaseModel):
@@ -78,16 +79,15 @@ def slice_landscape_pages(input_pdf_path, output_pdf_path):
         page = doc.load_page(page_num)
         text = page.get_text("text").upper()
         
-        # --- AGGRESSIVE OCR FALLBACK ---
-        # If the page has less than 400 digital characters, it is likely a flattened image or scan.
-        if len(text.strip()) < 400:
+        # --- OPTIMIZED OCR FALLBACK ---
+        # Lowered to 150 to prevent unnecessary OCR scanning on pages with minimal text, speeding up the app.
+        if len(text.strip()) < 150:
             try:
                 pix = page.get_pixmap(dpi=150) 
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                # Append the OCR text to whatever digital text already existed
                 text += " " + pytesseract.image_to_string(img).upper()
             except Exception as e:
-                pass # If OCR fails, ignore and move on
+                pass 
         # -------------------------------
         
         if any(k in text for k in landscape_keywords):
@@ -169,8 +169,8 @@ with tab1:
                     contents_payload = cloud_documents + [prompt]
                     result_data = None
 
-                    # --- AUTOMATED RETRY LOOP ---
-                    max_retries = 3
+                    # --- AUTOMATED RETRY LOOP (EXPONENTIAL BACKOFF) ---
+                    max_retries = 5
                     for attempt in range(max_retries):
                         try:
                             response = client.models.generate_content(
@@ -186,12 +186,14 @@ with tab1:
                             
                         except Exception as e:
                             error_msg = str(e).upper()
-                            if "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg:
+                            if "503" in error_msg or "UNAVAILABLE" in error_msg or "429" in error_msg or "QUOTA" in error_msg:
                                 if attempt < max_retries - 1:
-                                    st.warning(f"Google servers busy. Retrying in 15s... (Attempt {attempt + 1}/{max_retries})")
-                                    time.sleep(15)
+                                    # Exponential backoff: 10s, 20s, 40s, 80s + slight randomness to clear traffic
+                                    sleep_time = (2 ** attempt) * 10 + random.randint(1, 5)
+                                    st.warning(f"API Quota limits reached. Backing off for {sleep_time}s to reset... (Attempt {attempt + 1}/{max_retries})")
+                                    time.sleep(sleep_time)
                                 else:
-                                    st.error("Google servers are too busy right now. Please try again later.")
+                                    st.error("API Quota exceeded. Please upgrade your Gemini API key to a Pay-As-You-Go tier in Google AI Studio.")
                             else:
                                 st.error("Failed to generate master summary.")
                                 st.write(e)
@@ -254,7 +256,6 @@ with tab1:
                         except Exception as e:
                             st.error("AI Extracted the data, but failed to write to Google Sheets. Check your Secrets formatting and Share permissions!")
                             st.write(e)
-
 
 # ==========================================
 # TAB 2: ACTIVE BID BOARD
