@@ -174,7 +174,7 @@ with tab1:
                     for attempt in range(max_retries):
                         try:
                             response = client.models.generate_content(
-                                model='gemini-3.7-flash',
+                                model='gemini-2.0-flash',
                                 contents=contents_payload,
                                 config={
                                     'response_mime_type': 'application/json',
