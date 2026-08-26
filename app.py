@@ -105,6 +105,28 @@ def slice_landscape_pages(input_pdf_path, output_pdf_path):
     sliced_doc.save(output_pdf_path, garbage=4, deflate=True)
     return len(doc), len(sliced_doc), sorted(list(pages_to_keep))
 
+# --- Helper Function: Dynamic Model Discovery ---
+@st.cache_data(ttl=86400) # Caches the discovered model list for 24 hours
+def get_latest_flash_models(api_key_str):
+    client = genai.Client(api_key=api_key_str)
+    available_models = []
+    
+    try:
+        for m in client.models.list():
+            if "generateContent" in m.supported_actions:
+                name = m.name.replace("models/", "")
+                if "flash" in name and all(x not in name for x in ["lite", "exp", "preview", "image", "omni"]):
+                    available_models.append(name)
+    except Exception as e:
+        pass
+        
+    available_models.sort(reverse=True)
+    
+    if len(available_models) < 2:
+        return ["gemini-3.7-flash", "gemini-3.6-flash"] # Emergency fallback
+        
+    return available_models[:2]
+
 # --- Main UI: Two Tabs ---
 tab1, tab2 = st.tabs(["🌿 Analyze New Project", "🗄️ Pending Bid Sets"])
 
@@ -168,10 +190,12 @@ with tab1:
                     contents_payload = cloud_documents + [prompt]
                     result_data = None
 
-                    # --- DYNAMIC TIMEOUT & MODEL FALLBACK LOOP ---
+                    # --- DYNAMIC MODEL DISCOVERY & FALLBACK LOOP ---
+                    live_models = get_latest_flash_models(api_key)
+                    
                     models_to_try = [
-                        {'name': 'gemini-3.7-flash', 'timeout': 120000}, # 2-minute strict timeout
-                        {'name': 'gemini-3.6-flash', 'timeout': 300000}  # 5-minute fallback timeout
+                        {'name': live_models[0], 'timeout': 120000}, # Newest discovered model (2-min strict timeout)
+                        {'name': live_models[1], 'timeout': 300000}  # Previous model fallback (5-min timeout)
                     ]
                     
                     for model_config in models_to_try:
